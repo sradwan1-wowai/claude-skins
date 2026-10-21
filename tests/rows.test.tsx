@@ -979,23 +979,6 @@ test('with charts off, or Mermaid the parser cannot read, the fence keeps its co
   expect(await off.find({ type: 'Svg' })).toBeUndefined()
 })
 
-test('while charts are on, the system prompt tells Claude it can answer with one', async ($, on) => {
-  stubEngine(on)
-  on('prompt.compose', () => ({ sections: [{ id: 'base', text: 'You are Claude.', scope: 'shared' as const }] }))
-
-  const compose = (traits: readonly string[] = []) =>
-    $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: traits as never })
-
-  expect((await compose()).sections.map(section => section.id)).toEqual(['base', 'skins:charts'])
-  expect((await compose(['print'])).sections.map(section => section.id)).toEqual(['base'])
-
-  await runSkin($, 'hints off')
-  expect((await compose()).sections.map(section => section.id)).toEqual(['base'])
-  await runSkin($, 'hints on')
-  await runSkin($, 'charts off')
-  expect((await compose()).sections.map(section => section.id)).toEqual(['base'])
-})
-
 const BAND = (surface: (typeof SURFACES)[number], isWorking: boolean) =>
   ({
     ...SITE,
@@ -1287,9 +1270,9 @@ test('/skin pin keeps a look to this folder, /skin unpin returns to the default'
   expect((store.prefs as { skin: string }).skin).toBe('dracula')
 })
 
-// On a Team or Enterprise plan the built-in guard holds classic.SessionStart back from
-// user-tier mods, so /clear reaches skins only as the new session's first appended row.
-test('the first row of a new session loads the saved prefs again, without classic.SessionStart', async ($, on) => {
+// A managed policy plugin can bypass classic.SessionStart and session.append for user-tier
+// mods, so /clear and /resume reach skins as the new session's first turn.
+test('the first turn of a new session loads the saved prefs again', async ($, on) => {
   const store: Record<string, unknown> = {}
   let session = 's1'
   stubEngine(on, { store: true })
@@ -1303,30 +1286,25 @@ test('the first row of a new session loads the saved prefs again, without classi
   on('command.register', () => ({ value: { command: 'skin' } }))
   on('tool.register', () => ({ value: { tool: 'mcp__skins__design' } }))
   on('config.list', () => ({ value: [] }))
-  const note = { message: { type: 'user', content: [{ type: 'text', text: 'hi' }] } } as never
-
-  // An older kit (the pinned CI build) cannot append a row at all: nothing to check there.
-  if (!(await $.session.append(note).then(() => true, () => false))) {
-    return
-  }
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
 
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   const colorNow = async (id: string) =>
     spanColor((await (await $.ui.mount(toolUse(call('Bash', { command: 'ls' }, { tool_use_id: id })))).find({ type: 'Text', text: /Bash/ })) as Found, 'Bash')
   const before = await colorNow('b1')
 
-  // Saved by another session: the same session's rows leave the loaded prefs alone.
+  // Saved by another session: the same session's turns leave the loaded prefs alone.
   store.prefs = { skin: 'dracula' }
-  await $.session.append(note)
+  await $.turn.start({ text: 'hi', turnId: 't1' } as never)
   expect(await colorNow('b2')).toBe(before)
 
   session = 's2'
-  await $.session.append(note)
+  await $.turn.start({ text: 'hi', turnId: 't2' } as never)
   expect(await colorNow('b3')).not.toBe(before)
 })
 
 // A scheduled task's session, resumed in the desktop app, can start before Claude Code binds it (#64).
-test('a resume before the session is bound shows no error, and the next row loads it', async ($, on) => {
+test('a resume before the session is bound shows no error, and the next turn loads it', async ($, on) => {
   const logs: string[] = []
   let isBound = false
   let themeReads = 0
@@ -1343,46 +1321,15 @@ test('a resume before the session is bound shows no error, and the next row load
     themeReads += 1
     return { value: [] }
   })
-  on('classic.SessionStart', () => ({}) as never)
-  const note = { message: { type: 'user', content: [{ type: 'text', text: 'hi' }] } } as never
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
 
-  await $.classic.SessionStart({ source: 'resume' } as never)
+  await $.turn.start({ text: 'hi', turnId: 't1' } as never)
   expect(logs.filter(text => text.startsWith('not loaded yet:')), 'the prefs load without the theme').toHaveLength(0)
   expect(logs.filter(text => text.startsWith('theme not read yet:'))).toHaveLength(1)
 
-  // An older kit (the pinned CI build) cannot append a row at all: nothing more to check there.
   isBound = true
-  if (!(await $.session.append(note).then(() => true, () => false))) {
-    return
-  }
-  expect(themeReads, 'the row after the bind reads the theme').toBeGreaterThan(0)
-})
-
-// A terminal /resume appends no row until the next prompt, and $.session.id() can still answer
-// the old session there: the hook's own session_id loads the prefs for the history (#77).
-test('/resume loads the saved prefs from the hook session id, before any row is appended', async ($, on) => {
-  const store: Record<string, unknown> = {}
-  stubEngine(on, { store: true })
-  on('store.get', ($, e) => ({ value: store[e.key] }))
-  on('store.set', ($, e) => {
-    store[e.key] = e.value
-    return { value: undefined }
-  })
-  on('session.id', () => ({ value: 's1' }))
-  on('session.start', () => ({ cwd: '/work' }))
-  on('command.register', () => ({ value: { command: 'skin' } }))
-  on('tool.register', () => ({ value: { tool: 'mcp__skins__design' } }))
-  on('config.list', () => ({ value: [] }))
-  on('classic.SessionStart', () => ({}) as never)
-
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  const colorNow = async (id: string) =>
-    spanColor((await (await $.ui.mount(toolUse(call('Bash', { command: 'ls' }, { tool_use_id: id })))).find({ type: 'Text', text: /Bash/ })) as Found, 'Bash')
-  const before = await colorNow('r1')
-
-  store.prefs = { skin: 'dracula' }
-  await $.classic.SessionStart({ source: 'resume', session_id: 's2' } as never)
-  expect(await colorNow('r2')).not.toBe(before)
+  await $.turn.start({ text: 'hi', turnId: 't2' } as never)
+  expect(themeReads, 'the turn after the bind reads the theme').toBeGreaterThan(0)
 })
 
 test('quiet output folds a read-only call to its row, a failure to its error line', async ($, on) => {

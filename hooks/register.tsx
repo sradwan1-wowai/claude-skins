@@ -403,9 +403,9 @@ async function load($: EngineInterface): Promise<void> {
 
 // The session the prefs were last loaded for. /clear, /resume and /branch reset $.state to its
 // defaults and skip session.start, and on a Team or Enterprise plan the built-in guard
-// (cc-plugin-sec-default) keeps classic.SessionStart from user-tier mods: the new session's first
-// appended rows catch the change instead. No await between the check and the write, so a burst of
-// appends loads once.
+// (cc-plugin-sec-default) keeps classic.SessionStart and session.append from user-tier mods: the
+// new session's first turn catches the change instead. No await between the check and the write, so
+// a burst of turns loads once.
 let loadedFor: string | undefined
 
 // Undefined where nothing answers for the session's id (a test's engine): then there is nothing to compare.
@@ -692,13 +692,6 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Where the guard does not hold it back, this comes first; session.append then finds the session loaded.
-  on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
-    await reloadIfNewSession($, typeof e.session_id === 'string' && e.session_id !== '' ? e.session_id : undefined)
-
-    return next(e)
-  })
-
   on('ui.invalidate', async ($, e, next) => {
     await retryTheme($)
 
@@ -710,7 +703,11 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // A new session (/clear, /resume, /fork) is noticed here: see loadedFor. The theme retry goes
+  // first, so a load that cannot read it yet logs once.
   on('turn.start', async ($, e, next) => {
+    await retryTheme($)
+    await reloadIfNewSession($)
     stats = NO_STATS
     isWorking = true
     // A worktree can move the session between turns.
@@ -732,21 +729,6 @@ export const register: Register = on => {
     }
 
     return result
-  })
-
-  // Loads the prefs again for a new session (see loadedFor), and notes which prompts carried images,
-  // so their row keeps Claude Code's drawing of them.
-  on('session.append', async ($, e, next) => {
-    await reloadIfNewSession($)
-    await retryTheme($)
-    const stored = await next(e)
-    const hasImage = e.door === 'prompt' && e.message.content.some(block => block.type === 'image')
-
-    if (hasImage && stored.uuid !== undefined) {
-      await update($, memberOf(imagesAtom, { requestId: stored.uuid }), () => true)
-    }
-
-    return stored
   })
 
   // A turn's end and a plan limit's move are when the band's numbers change.
@@ -1122,20 +1104,6 @@ export const register: Register = on => {
 
     // Claude Code draws the images; the text is already in the outline above them.
     return promptRow(look, e.props.text, hasImages ? await next({ ...e, props: { ...e.props, text: '' } }) : undefined)
-  })
-
-  // While charts are drawn, the model learns it can answer a "show me" with a Mermaid
-  // fence. Nothing for a headless run, which draws nothing.
-  on('prompt.compose', async ($, e, next) => {
-    const result = await next(e)
-    const active = await activeSkin($)
-    const isHeadless = e.surfaces.length === 0 || e.traits.includes('bare') || e.traits.includes('print')
-
-    if (active === null || !active.prefs.charts || !active.prefs.hints || isHeadless) {
-      return result
-    }
-
-    return { sections: [...result.sections, { id: 'skins:charts', text: CHART_HINT, scope: 'session' as const }] }
   })
 
   // A reply keeps Claude Code's own drawing unless it holds a card or markdown the pack draws.
